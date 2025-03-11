@@ -3,4 +3,5 @@ Include/
 Scripts/
 pyvenv.cfg
 LJSPEECH
-share
+share/*
+__pycache__/*
