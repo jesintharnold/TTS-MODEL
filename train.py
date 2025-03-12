@@ -2,16 +2,16 @@ from model import TransformerTTS
 import torch
 import torch.nn as nn
 import os
-model = TransformerTTS(vocab_size=100,embedding_dim=256,hidden_dim=512,n_heads=8,n_layers=4,output_dim=80)
-optimizer= torch.optim.Adam(model.parameters(),lr=1e-4)
+
 spectogram_loss=nn.MSELoss()
 duration_loss=nn.MSELoss()
+
 
 class TTStrain:
     def __init__(self,model,device,train_loader,val_loader,lr=1e-4):
         self.model=model.to(device)
-        self.train=train_loader
-        self.val=val_loader
+        self.train_data=train_loader
+        self.val_data=val_loader
         self.device=device
         self.spectogram_loss=nn.MSELoss()
         self.duration_loss=nn.MSELoss()
@@ -19,37 +19,37 @@ class TTStrain:
 
     def train_epoch(self):
         total_loss=0.0
-        for batch_idx,(text,spectogram,durations) in enumerate(self.train):
-            text = text.to(self.device)
-            spectogram = spectogram.to(self.device)
-            durations = durations.to(self.device)
+        for batch_idx,batch in enumerate(self.train_data):
+            text = batch["phonemes"].to(self.device)
+            spectogram = batch["mel"].to(self.device)
+            durations = batch["duration"].to(self.device)
             self.optimizer.zero_grad()
             predicted_spectrogram, predicted_durations = self.model(text, spectogram, durations)
             spectogram_loss = self.spectogram_loss(predicted_spectrogram,spectogram)
             duration_loss = self.duration_loss(predicted_durations,durations)
+            
             loss = spectogram_loss+duration_loss
             loss.backward()
             self.optimizer.step()
             total_loss+=loss.item()
             if (batch_idx + 1) % 10 == 0:
-                print(f"Batch {batch_idx + 1}/{len(self.train)}, Loss: {loss.item()}")
-        return total_loss / len(self.train)
+                print(f"Batch {batch_idx + 1}/{len(self.train_data)}, Loss: {loss.item()}")
+        return total_loss / len(self.train_data)
     
     def validate(self):
         self.model.eval()
         total_loss = 0.0
         with torch.no_grad():
-            for text, spectrogram, durations in self.val:
-                text = text.to(self.device)
-                spectrogram = spectrogram.to(self.device)
-                durations = durations.to(self.device)
-                predicted_spectrogram, predicted_durations = self.model(text, spectrogram, durations)
-                spectrogram_loss = self.spectogram_loss(predicted_spectrogram, spectrogram)
+            for batch in self.val_data:
+                text = batch["phonemes"].to(self.device)
+                spectogram = batch["mel"].to(self.device)
+                durations = batch["duration"].to(self.device)
+                predicted_spectrogram, predicted_durations = self.model(text, spectogram, durations)
+                spectrogram_loss = self.spectogram_loss(predicted_spectrogram, spectogram)
                 duration_loss = self.duration_loss(predicted_durations, durations)
                 loss = spectrogram_loss + duration_loss
                 total_loss += loss.item()
-        return total_loss / len(self.val)
-
+        return total_loss / len(self.val_data)
 
     def save_checkpoint(self, epoch, save_dir="checkpoints"):
         if not os.path.exists(save_dir):
@@ -69,10 +69,11 @@ class TTStrain:
         print(f"Checkpoint loaded from {checkpoint_path}")
 
     def train(self,epoch=10, save_dir="checkpoints"):
-        for i in epoch:
+        for i in range(epoch):
             train_loss=self.train_epoch()
             val_loss = self.validate()
             print(f"Train Loss: {train_loss}")
+            best_val_loss = 100000000000
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 self.save_checkpoint(epoch, save_dir)
@@ -85,6 +86,50 @@ class TTStrain:
             predicted_spectrogram = predicted_spectrogram.squeeze(0).cpu().numpy()
             return predicted_spectrogram
         
+#-------supporting function and its init data---
+
+from dataset import LJSpeechDataset
+from torch.utils.data import DataLoader
+import numpy as np
+from torch.nn.utils.rnn import pad_sequence
+metadata_train_path="./LJSPEECH/train.txt"
+metadata_val_path="./LJSPEECH/val.txt"
+mel_dir="./LJSPEECH/mel"
+duration_dir="./LJSPEECH/duration"
+
+def create_phonemes_dict():
+   phonemes=set()
+   with open(metadata_train_path,'r',encoding='utf-8') as file:
+        for line in file:
+            _phonemes_=line.strip().split("|")[2].strip('{}')
+            for phoneme in _phonemes_.split():
+                phonemes.add(phoneme)
+   arr=sorted(phonemes)
+   phoneme_map={ val:key for key,val in enumerate(arr)}
+   phoneme_map["PAD"] = len(arr)
+   phoneme_map["UNK"] = len(arr)+1
+   return phoneme_map
+
+phoneme_map=create_phonemes_dict()   
+def collatefn(batch):
+    mels = []
+    durations = []
+    phonemes = []
+    texts = []
+    for item in batch:
+        mels.append(item['mel'])
+        durations.append(item['duration'])
+        phonemes.append(item['phonemes'])
+        texts.append(item['text'])
+    mels_padded = pad_sequence(mels, batch_first=True, padding_value=0)
+    durations_padded = pad_sequence(durations, batch_first=True, padding_value=0)
+    phonemes_padded = pad_sequence(phonemes, batch_first=True, padding_value=phoneme_map["PAD"])
+    return {
+        'mel': mels_padded,
+        'duration': durations_padded,
+        'phonemes': phonemes_padded,
+        'text': texts
+    }
 
 if __name__ == "__main__":
     vocab_size = 100
@@ -93,6 +138,38 @@ if __name__ == "__main__":
     n_heads = 8
     n_layers = 4
     output_dim = 80
-    batch_size = 32
+    batch_size = 4
     num_epochs = 20
+    max_data=100
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = TransformerTTS(vocab_size=100,embedding_dim=256,hidden_dim=512,n_heads=8,n_layers=4,output_dim=80)
+    optimizer= torch.optim.Adam(model.parameters(),lr=1e-4)
+    train_dataset=LJSpeechDataset(metadata_path=metadata_train_path,mel_dir=mel_dir,duration_dir=duration_dir,phoneme_dict=phoneme_map,max_data=max_data)
+    train_loader=DataLoader(
+        dataset=train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=4,
+        collate_fn=collatefn
+    )
+
+    val_dataset=LJSpeechDataset(metadata_path=metadata_val_path,mel_dir=mel_dir,duration_dir=duration_dir,phoneme_dict=phoneme_map,max_data=max_data//2)
+    val_loader=DataLoader(
+        dataset=val_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=4,
+        collate_fn=collatefn
+    )
+
+
+    for batch in train_loader:
+      print("Mel Shape:", batch['mel'].shape)
+      print("Duration Shape:", batch['duration'].shape)
+      print("Phonemes:", batch['phonemes'].shape)
+      print("Text:", batch['text'])
+      break
+
+
+    trainer = TTStrain(model=model,device=device,train_loader=train_loader,val_loader=val_loader,lr=1e-4)
+    trainer.train(epoch=num_epochs)

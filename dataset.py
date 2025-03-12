@@ -3,13 +3,13 @@ from torch.utils.data import Dataset, DataLoader
 import numpy as np
 
 class LJSpeechDataset(Dataset):
-    def __init__(self, metadata_path, mel_dir, duration_dir,phoneme_dict):
-        self.metadata = self._load_metadata(metadata_path)
+    def __init__(self, metadata_path, mel_dir, duration_dir,phoneme_dict,max_data=None):
+        self.metadata = self._load_metadata(metadata_path,max_data)
         self.mel_dir = mel_dir
         self.duration_dir = duration_dir
         self.phoeneme_dict=phoneme_dict
 
-    def _load_metadata(self, metadata_path):
+    def _load_metadata(self, metadata_path,max_datapoints):
         data = []
         with open(metadata_path, 'r', encoding='utf-8') as file:
             for line in file:
@@ -19,6 +19,9 @@ class LJSpeechDataset(Dataset):
                 phonemes = parts[2].strip('{}')
                 text = parts[3]
                 data.append((file_id, speaker, phonemes, text))
+                if max_datapoints is not None and len(data) >= max_datapoints:
+                    break
+        print("Total length :",len(data))
         return data
     
     def _phoneme_to_indices_(self,phoneme_string):
@@ -35,7 +38,7 @@ class LJSpeechDataset(Dataset):
         duration_path = f"{self.duration_dir}/LJSpeech-duration-{file_id}.npy"
 
         mel = torch.tensor(np.load(mel_path), dtype=torch.float32)
-        duration = torch.tensor(np.load(duration_path), dtype=torch.int64)
+        duration = torch.tensor(np.load(duration_path), dtype=torch.float32)
         phonemes = torch.tensor(self._phoneme_to_indices_(phoneme_string=phonemes),dtype=torch.long)
         return {
             'mel': mel,
