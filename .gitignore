@@ -4,4 +4,9 @@ Scripts/
 pyvenv.cfg
 LJSPEECH
 share/*
-__pycache__/*
+__pycache__
+HIFIGAN
+hifi-gan
+LJ_V1
+checkpoints
+settings.json

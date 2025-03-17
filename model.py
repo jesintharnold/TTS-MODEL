@@ -75,10 +75,11 @@ class TransformerTTS(nn.Module):
         encoder=self.encoder(embed)
         durationpredictor=self.duration_predictor(encoder)
 
-        if durations is not None:
-            reg_output, projected_spectogram = self.length_regulator(encoder, durations.squeeze(-1), spectogram)
-        else:
-            reg_output,projected_spectogram = self.length_regulator(encoder,durationpredictor.squeeze(-1),spectogram)
+        if durations is None:
+            durations = torch.clamp(durationpredictor, min=1.0)
+            durations = torch.round(durations).int()
+        durations = durations.squeeze(-1)    
+        reg_output, projected_spectogram = self.length_regulator(encoder, durations.squeeze(-1), spectogram)
         
         if spectogram is not None:
             decoder_output = self.decoder(projected_spectogram,reg_output)
@@ -86,4 +87,8 @@ class TransformerTTS(nn.Module):
             decoder_output = self.decoder(reg_output,reg_output)
         
         output = self.fc(decoder_output)
+        # output = torch.sigmoid(output)
         return output,durationpredictor
+
+
+
