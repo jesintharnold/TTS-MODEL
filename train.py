@@ -39,7 +39,7 @@ class TTStrain:
             spectogram_loss = self.spectogram_loss(predicted_spectrogram,spectogram)
             duration_loss = self.duration_loss(predicted_durations,durations)
             
-            loss = spectogram_loss+0.1*duration_loss
+            loss = spectogram_loss+0.5*duration_loss
             loss.backward()
             self.optimizer.step()
             total_loss+=loss.item()
@@ -167,7 +167,7 @@ if __name__ == "__main__":
     output_dim = 80
     batch_size = 32
     num_epochs = 50
-    max_data=200
+    max_data=50
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = TransformerTTS(vocab_size=100,embedding_dim=256,hidden_dim=512,n_heads=8,n_layers=4,output_dim=80)

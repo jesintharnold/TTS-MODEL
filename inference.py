@@ -22,7 +22,7 @@ print(phoneme_map)
 
 def convert_to_phonemes(text, phonememap, device):
     phonemes = g2p(text=text)
-    phonemes = [p.strip() for p in phonemes if p.strip() and p not in [".", ",", "!", "?"]]
+    phonemes = ['P', 'R', 'IH1', 'N', 'T', 'IH0', 'NG', 'sp', 'IH1', 'N', 'DH', 'IY0', 'OW1', 'N', 'L', 'IY0', 'S', 'EH1', 'N', 'S', 'W', 'IH1', 'DH', 'sp', 'W', 'IH1', 'CH', 'W', 'IY1', 'AA1', 'R', 'AE1', 'T', 'P', 'R', 'EH1', 'Z', 'AH0', 'N', 'T', 'K', 'AH0', 'N', 'S', 'ER1', 'N', 'D', 'sp', 'D', 'IH1', 'F', 'ER0', 'Z', 'sp', 'F', 'R', 'AH1', 'M', 'M', 'OW1', 'S', 'T', 'IH1', 'F', 'N', 'AA1', 'T', 'F', 'R', 'AH1', 'M', 'AO1', 'L', 'DH', 'IY0', 'AA1', 'R', 'T', 'S', 'AH0', 'N', 'D', 'K', 'R', 'AE1', 'F', 'T', 'S', 'R', 'EH2', 'P', 'R', 'IH0', 'Z', 'EH1', 'N', 'T', 'IH0', 'D', 'IH1', 'N', 'DH', 'IY0', 'EH2', 'K', 'S', 'AH0', 'B', 'IH1', 'SH', 'AH0', 'N']
     phonemes_indices = [phonememap.get(p, phonememap["UNK"]) for p in phonemes]
     print("Extracted phonemes:", phonemes)
     print("Extracted phonemes indices:", phonemes_indices)
@@ -35,7 +35,7 @@ def inferenceModel():
         json_config = json.loads(f.read())
     h = AttrDict(json_config)
     model = TransformerTTS(vocab_size=100,embedding_dim=256,hidden_dim=512,n_heads=8,n_layers=4,output_dim=80)
-    checkpoint = torch.load("./checkpoints/model_epoch_41.pt",map_location=device)
+    checkpoint = torch.load("./checkpoints/model_epoch_49.pt",map_location=device)
     model.load_state_dict(checkpoint["model_state_dict"])
     model=model.to(device=device)
     model.eval()
