@@ -10,9 +10,6 @@ import numpy as np
 from torch.nn.utils.rnn import pad_sequence
 
 
-
-spectogram_loss=nn.MSELoss()
-duration_loss=nn.MSELoss()
 best_val_loss = 100000000000
 
 class TTStrain:
@@ -21,9 +18,9 @@ class TTStrain:
         self.train_data=train_loader
         self.val_data=val_loader
         self.device=device
-        self.spectogram_loss=nn.MSELoss()
         self.duration_loss=nn.MSELoss()
         self.optimizer=torch.optim.Adam(self.model.parameters(),lr=lr)
+        self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=10, gamma=0.5)
         self.latest_checkpoint = None
         self.train_losses = []
         self.val_losses = []
@@ -36,12 +33,13 @@ class TTStrain:
             durations = batch["duration"].to(self.device)
             self.optimizer.zero_grad()
             predicted_spectrogram, predicted_durations = self.model(text, spectogram, durations)
-            spectogram_loss = self.spectogram_loss(predicted_spectrogram,spectogram)
+            spectogram_loss = 0.7 * nn.MSELoss()(predicted_spectrogram, spectogram) + 0.3 * nn.L1Loss()(predicted_spectrogram, spectogram)
             duration_loss = self.duration_loss(predicted_durations,durations)
             
-            loss = spectogram_loss+0.5*duration_loss
+            loss = spectogram_loss+1.0*duration_loss
             loss.backward()
             self.optimizer.step()
+            self.scheduler.step()
             total_loss+=loss.item()
             if (batch_idx + 1) % 10 == 0:
                 print(f"Batch {batch_idx + 1}/{len(self.train_data)}, Loss: {loss.item()}")
@@ -56,9 +54,9 @@ class TTStrain:
                 spectogram = batch["mel"].to(self.device)
                 durations = batch["duration"].to(self.device)
                 predicted_spectrogram, predicted_durations = self.model(text, spectogram, durations)
-                spectrogram_loss = self.spectogram_loss(predicted_spectrogram, spectogram)
+                spectrogram_loss = 0.7 * nn.MSELoss()(predicted_spectrogram, spectogram) + 0.3 * nn.L1Loss()(predicted_spectrogram, spectogram)
                 duration_loss = self.duration_loss(predicted_durations, durations)
-                loss = spectrogram_loss + 0.1*duration_loss
+                loss = spectrogram_loss + 1.0*duration_loss
                 total_loss += loss.item()
         return total_loss / len(self.val_data)
 
@@ -159,7 +157,7 @@ def collatefn(batch):
 
 if __name__ == "__main__":
     
-    vocab_size = 200
+    vocab_size = len(phoneme_map)
     embedding_dim = 512
     hidden_dim = 512
     n_heads = 8
@@ -167,10 +165,13 @@ if __name__ == "__main__":
     output_dim = 80
     batch_size = 32
     num_epochs = 50
-    max_data=50
+    train_max_data=256
+    val_max_data=100
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = TransformerTTS(vocab_size=100,embedding_dim=256,hidden_dim=512,n_heads=8,n_layers=4,output_dim=80)
+    print("Training the data in device - ",device)
+
+    model = TransformerTTS(vocab_size=vocab_size,embedding_dim=embedding_dim,hidden_dim=hidden_dim,n_heads=n_heads,n_layers=n_layers,output_dim=80)
     optimizer= torch.optim.Adam(model.parameters(),lr=1e-4)
 
     with open("./mel_min_max.json",'r') as f:
@@ -179,7 +180,7 @@ if __name__ == "__main__":
         mel_max=melconfig["mel_max"]
 
 
-    train_dataset=LJSpeechDataset(metadata_path=metadata_train_path,mel_dir=mel_dir,duration_dir=duration_dir,phoneme_dict=phoneme_map,max_data=max_data,mel_min=mel_min,mel_max=mel_max)
+    train_dataset=LJSpeechDataset(metadata_path=metadata_train_path,mel_dir=mel_dir,duration_dir=duration_dir,phoneme_dict=phoneme_map,max_data=train_max_data,mel_min=mel_min,mel_max=mel_max)
     train_loader=DataLoader(
         dataset=train_dataset,
         batch_size=batch_size,
@@ -194,7 +195,7 @@ if __name__ == "__main__":
         break
 
 
-    val_dataset=LJSpeechDataset(metadata_path=metadata_val_path,mel_dir=mel_dir,duration_dir=duration_dir,phoneme_dict=phoneme_map,max_data=max_data//2,mel_min=mel_min,mel_max=mel_max)
+    val_dataset=LJSpeechDataset(metadata_path=metadata_val_path,mel_dir=mel_dir,duration_dir=duration_dir,phoneme_dict=phoneme_map,max_data=val_max_data,mel_min=mel_min,mel_max=mel_max)
     val_loader=DataLoader(
         dataset=val_dataset,
         batch_size=batch_size,
