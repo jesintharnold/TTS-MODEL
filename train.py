@@ -33,10 +33,15 @@ class TTStrain:
             durations = batch["duration"].to(self.device)
             self.optimizer.zero_grad()
             predicted_spectrogram, predicted_durations = self.model(text, spectogram, durations)
-            spectogram_loss = 0.7 * nn.MSELoss()(predicted_spectrogram, spectogram) + 0.3 * nn.L1Loss()(predicted_spectrogram, spectogram)
+
+            if batch_idx == 0:
+                print(f"Predicted durations (first sample): {predicted_durations[0].cpu().detach().numpy()}")
+                print(f"Ground truth durations (first sample): {durations[0].cpu().numpy()}")
+            
+            spectogram_loss = 0.5 * nn.MSELoss()(predicted_spectrogram, spectogram) + 0.5 * nn.L1Loss()(predicted_spectrogram, spectogram)
             duration_loss = self.duration_loss(predicted_durations,durations)
             
-            loss = spectogram_loss+1.0*duration_loss
+            loss = spectogram_loss+2.0*duration_loss
             loss.backward()
             self.optimizer.step()
             self.scheduler.step()
@@ -54,9 +59,9 @@ class TTStrain:
                 spectogram = batch["mel"].to(self.device)
                 durations = batch["duration"].to(self.device)
                 predicted_spectrogram, predicted_durations = self.model(text, spectogram, durations)
-                spectrogram_loss = 0.7 * nn.MSELoss()(predicted_spectrogram, spectogram) + 0.3 * nn.L1Loss()(predicted_spectrogram, spectogram)
+                spectrogram_loss = 0.5 * nn.MSELoss()(predicted_spectrogram, spectogram) + 0.5 * nn.L1Loss()(predicted_spectrogram, spectogram)
                 duration_loss = self.duration_loss(predicted_durations, durations)
-                loss = spectrogram_loss + 1.0*duration_loss
+                loss = spectrogram_loss + 2.0*duration_loss
                 total_loss += loss.item()
         return total_loss / len(self.val_data)
 
@@ -95,17 +100,24 @@ class TTStrain:
         plt.close()
         print(f"Loss plot saved at {plot_path}")
 
-    def train(self,epoch=10, save_dir="checkpoints"):
+    def train(self, epoch=10, save_dir="checkpoints", patience=20):
+        best_val_loss = float('inf')
+        patience_counter = 0
         for i in range(epoch):
-            train_loss=self.train_epoch()
+            train_loss = self.train_epoch()
             val_loss = self.validate()
             self.train_losses.append(train_loss)
             self.val_losses.append(val_loss)
-            print(f"Epoch - {i} , Train loss - {train_loss} , Val loss - {val_loss}")
-            global best_val_loss
+            print(f"Epoch - {i}, Train loss - {train_loss}, Val loss - {val_loss}")
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 self.save_checkpoint(i, save_dir)
+                patience_counter = 0
+            else:
+                patience_counter += 1
+                if patience_counter >= patience:
+                    print(f"Early stopping at epoch {i} due to no improvement in validation loss.")
+                    break
             self.plot_losses(save_dir)
             
         
@@ -158,15 +170,14 @@ def collatefn(batch):
 if __name__ == "__main__":
     
     vocab_size = len(phoneme_map)
-    embedding_dim = 512
-    hidden_dim = 512
-    n_heads = 8
-    n_layers = 8
-    output_dim = 80
-    batch_size = 32
-    num_epochs = 50
-    train_max_data=256
-    val_max_data=100
+    embedding_dim = 768
+    hidden_dim = 768
+    n_heads = 12
+    n_layers = 12
+    batch_size = 16
+    num_epochs = 200
+    train_max_data=10000
+    val_max_data=1000
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Training the data in device - ",device)

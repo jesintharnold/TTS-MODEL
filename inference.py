@@ -22,11 +22,23 @@ print(phoneme_map)
 
 def convert_to_phonemes(text, phonememap, device):
     phonemes = g2p(text=text)
-    phonemes = ['P', 'R', 'IH1', 'N', 'T', 'IH0', 'NG', 'sp', 'IH1', 'N', 'DH', 'IY0', 'OW1', 'N', 'L', 'IY0', 'S', 'EH1', 'N', 'S', 'W', 'IH1', 'DH', 'sp', 'W', 'IH1', 'CH', 'W', 'IY1', 'AA1', 'R', 'AE1', 'T', 'P', 'R', 'EH1', 'Z', 'AH0', 'N', 'T', 'K', 'AH0', 'N', 'S', 'ER1', 'N', 'D', 'sp', 'D', 'IH1', 'F', 'ER0', 'Z', 'sp', 'F', 'R', 'AH1', 'M', 'M', 'OW1', 'S', 'T', 'IH1', 'F', 'N', 'AA1', 'T', 'F', 'R', 'AH1', 'M', 'AO1', 'L', 'DH', 'IY0', 'AA1', 'R', 'T', 'S', 'AH0', 'N', 'D', 'K', 'R', 'AE1', 'F', 'T', 'S', 'R', 'EH2', 'P', 'R', 'IH0', 'Z', 'EH1', 'N', 'T', 'IH0', 'D', 'IH1', 'N', 'DH', 'IY0', 'EH2', 'K', 'S', 'AH0', 'B', 'IH1', 'SH', 'AH0', 'N']
+    # phonemes = ['P', 'R', 'IH1', 'N', 'T', 'IH0', 'NG', 'sp', 'IH1', 'N', 'DH', 'IY0', 'OW1', 'N', 'L', 'IY0', 'S', 'EH1', 'N', 'S', 'W', 'IH1', 'DH', 'sp', 'W', 'IH1', 'CH', 'W', 'IY1', 'AA1', 'R', 'AE1', 'T', 'P', 'R', 'EH1', 'Z', 'AH0', 'N', 'T', 'K', 'AH0', 'N', 'S', 'ER1', 'N', 'D', 'sp', 'D', 'IH1', 'F', 'ER0', 'Z', 'sp', 'F', 'R', 'AH1', 'M', 'M', 'OW1', 'S', 'T', 'IH1', 'F', 'N', 'AA1', 'T', 'F', 'R', 'AH1', 'M', 'AO1', 'L', 'DH', 'IY0', 'AA1', 'R', 'T', 'S', 'AH0', 'N', 'D', 'K', 'R', 'AE1', 'F', 'T', 'S', 'R', 'EH2', 'P', 'R', 'IH0', 'Z', 'EH1', 'N', 'T', 'IH0', 'D', 'IH1', 'N', 'DH', 'IY0', 'EH2', 'K', 'S', 'AH0', 'B', 'IH1', 'SH', 'AH0', 'N']
+    phonemes = [p.strip() for p in phonemes if p.strip() and p not in [".", ",", "!", "?"]]
     phonemes_indices = [phonememap.get(p, phonememap["UNK"]) for p in phonemes]
     print("Extracted phonemes:", phonemes)
     print("Extracted phonemes indices:", phonemes_indices)
     return torch.tensor(phonemes_indices, dtype=torch.long).unsqueeze(0).to(device=device)
+
+
+
+vocab_size = len(phoneme_map)
+embedding_dim = 512
+hidden_dim = 512
+n_heads = 8
+n_layers = 12
+output_dim = 80
+batch_size = 16
+
 
 def inferenceModel():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -34,8 +46,8 @@ def inferenceModel():
     with open("./LJ_V1/config.json", "r") as f:
         json_config = json.loads(f.read())
     h = AttrDict(json_config)
-    model = TransformerTTS(vocab_size=100,embedding_dim=256,hidden_dim=512,n_heads=8,n_layers=4,output_dim=80)
-    checkpoint = torch.load("./checkpoints/model_epoch_49.pt",map_location=device)
+    model = TransformerTTS(vocab_size=vocab_size,embedding_dim=embedding_dim,hidden_dim=hidden_dim,n_heads=n_heads,n_layers=n_layers,output_dim=output_dim)
+    checkpoint = torch.load("./checkpoints/model_epoch_2.pt",map_location=device)
     model.load_state_dict(checkpoint["model_state_dict"])
     model=model.to(device=device)
     model.eval()
@@ -66,14 +78,21 @@ def inferenceModel():
                     predicted_durations = torch.round(predicted_durations).int()
                     print("Predicted Durations :",predicted_durations)
                     
-                    # First check if the output is already in the normalized range [0,1]
+                    # # First check if the output is already in the normalized range [0,1]
+                    # print(f"Pre-denorm Mel Range: Min={predicted_mel_spectogram.min().item():.2f}, Max={predicted_mel_spectogram.max().item():.2f}")
+                    # predicted_mel_spectogram = (predicted_mel_spectogram - predicted_mel_spectogram.min()) / (predicted_mel_spectogram.max() - predicted_mel_spectogram.min())
+                    # print(f"Post-norm Mel Range: Min={predicted_mel_spectogram.min().item():.2f}, Max={predicted_mel_spectogram.max().item():.2f}")
+
+                    # # Apply denormalization
+                    # predicted_mel_spectogram = predicted_mel_spectogram * (mel_max - mel_min) + mel_min
+
+                    # print(f"Post-denorm Mel Range: Min={predicted_mel_spectogram.min().item():.2f}, Max={predicted_mel_spectogram.max().item():.2f}")
+                    # print(f"Expected Mel Range: Min={mel_min:.2f}, Max={mel_max:.2f}")
+
                     print(f"Pre-denorm Mel Range: Min={predicted_mel_spectogram.min().item():.2f}, Max={predicted_mel_spectogram.max().item():.2f}")
-                    predicted_mel_spectogram = (predicted_mel_spectogram - predicted_mel_spectogram.min()) / (predicted_mel_spectogram.max() - predicted_mel_spectogram.min())
-                    print(f"Post-norm Mel Range: Min={predicted_mel_spectogram.min().item():.2f}, Max={predicted_mel_spectogram.max().item():.2f}")
-
-                    # Apply denormalization
+    
+                    # Apply denormalization directly
                     predicted_mel_spectogram = predicted_mel_spectogram * (mel_max - mel_min) + mel_min
-
                     print(f"Post-denorm Mel Range: Min={predicted_mel_spectogram.min().item():.2f}, Max={predicted_mel_spectogram.max().item():.2f}")
                     print(f"Expected Mel Range: Min={mel_min:.2f}, Max={mel_max:.2f}")
                     

@@ -114,9 +114,9 @@ class TransformerDecoderLayer(nn.Module):
 class DurationPredictor(nn.Module):
     def __init__(self,embedding_dim,hidden_dim):
         super().__init__()
-        self.fc1=nn.Linear(embedding_dim,hidden_dim)
+        self.fc1=nn.Linear(embedding_dim,hidden_dim*2)
         self.act=nn.ReLU()
-        self.fc2=nn.Linear(hidden_dim,1)
+        self.fc2=nn.Linear(hidden_dim*2,1)
         self.softplus = nn.Softplus()
     def forward(self,x):
         batch_size,seq_len,embedding_dim=x.shape
@@ -129,30 +129,36 @@ class DurationPredictor(nn.Module):
         return x
 
 class LengthRegulator(nn.Module):
-    def __init__(self, input_dim=None, projection_dim=None):
+    def __init__(self,input_dim=None, projection_dim=None):
         super().__init__()
         self.projection = None
         if input_dim is not None and projection_dim is not None:
             self.projection = nn.Linear(input_dim, projection_dim)
 
-    def forward(self, x, durations, target=None):
+    def forward(self,x,durations,target=None):
         batch_size, seq_len, embedding_dim = x.shape
-        durations = durations.long()  # (batch_size, seq_len)
-        durations = torch.clamp(durations, min=1)
-        expanded_x_list = []
+        expanded_x=[]
+        max_seq_len=0
+
         for i in range(batch_size):
-            expanded = torch.repeat_interleave(x[i], durations[i], dim=0)
-            expanded_x_list.append(expanded)
-        expanded_x = torch.nn.utils.rnn.pad_sequence(expanded_x_list, batch_first=True, padding_value=0.0)
+            seq=[]
+            for j in range(seq_len):
+                seq.append(x[i,j].repeat(int(durations[i,j].item()),1))
+            seq=torch.cat(seq,dim=0)
+            expanded_x.append(seq)
+
+            if seq.size(0) > max_seq_len:
+                max_seq_len=seq.size(0)
+        for i in range(batch_size):
+            seq_len_index = expanded_x[i].size(0)
+
+            if seq_len_index < max_seq_len:
+                padding = torch.zeros((max_seq_len-seq_len_index,embedding_dim),device=x.device)
+                expanded_x[i] = torch.cat([expanded_x[i], padding], dim=0)
+        expanded_x=torch.stack(expanded_x,dim=0)
         if target is not None and self.projection is not None:
             target = self.projection(target)
-            target_max_len = expanded_x.shape[1]
-            if target.shape[1] < target_max_len:
-                padding = torch.zeros((batch_size, target_max_len - target.shape[1], embedding_dim), device=x.device)
-                target = torch.cat([target, padding], dim=1)
-            elif target.shape[1] > target_max_len:
-                target = target[:, :target_max_len, :]
-        return expanded_x, target
+        return expanded_x,target
 
 class TransformerTTS(nn.Module):
     def __init__(self,vocab_size,embedding_dim,hidden_dim,n_heads,n_layers,output_dim):
