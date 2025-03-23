@@ -5,20 +5,35 @@ import torch.nn.functional as F
 
 # embedding ---> encoder ---> duration predictor --->lenth regulator ---> decoder ---> final output
 
+class PositionalEncoding(nn.Module):
+    def __init__(self, embed_dim, max_len=1000):
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.max_len = max_len
+        pe = torch.zeros(max_len, embed_dim)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, embed_dim, 2).float() * (-torch.log(torch.tensor(10000.0)) / embed_dim))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(0)
+        self.register_buffer('pe', pe)
 
+    def forward(self, seq_len):
+        return self.pe[:, :seq_len, :]
 
 class RelativePositionalEncoding(nn.Module):
     def __init__(self, embed_dim,num_heads,max_len=1000):
         super().__init__()
         self.embed_dim=embed_dim
         self.max_len=max_len
+        self.head_dim = embed_dim // num_heads
         self.relative_positional_embedding=nn.Parameter(
-            torch.zeros(2*max_len-1,embed_dim // num_heads)  # 2*L-1 , head_dim
+            torch.zeros(2*max_len-1,self.head_dim)  # 2*L-1 , head_dim
         ) 
         nn.init.trunc_normal_(self.relative_positional_embedding, std=0.02)
 
     def forward(self,seq_len):
-        positions = torch.arange(seq_len,dtype=torch.long).unsqueeze(0)
+        positions = torch.arange(seq_len, dtype=torch.long, device=self.relative_positional_embedding.device).unsqueeze(0)
         positions = positions - positions.transpose(0,1)
         positions+=self.max_len-1
         positions = torch.clamp(positions, 0, 2 * self.max_len - 2)
@@ -38,7 +53,7 @@ class RelativeMultiHeadAttention(nn.Module):
         self.out_proj = nn.Linear(embed_dim, embed_dim)
         self.rel_pos_encoding = RelativePositionalEncoding(embed_dim,num_heads=num_heads)
 
-    def forward(self,query,key,value):
+    def forward(self,query,key,value,mask=None):
         B,T,C = query.shape
         q = self.q_proj(query).view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
         k = self.k_proj(key).view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
@@ -55,6 +70,9 @@ class RelativeMultiHeadAttention(nn.Module):
         # print("RPE shape : ",rel_pos_embeddings.shape)
         # print("RPE multi-output shape : ",rpe.shape)
         # print("Attention score - 2 shape : ",attn.shape)
+        if mask is not None:
+            mask = mask.unsqueeze(1)
+            attn = attn.masked_fill(mask, float('-inf'))
 
         attn_weights = F.softmax(attn, dim=-1)
         output = torch.matmul(attn_weights, v)
@@ -74,9 +92,9 @@ class TransformerEncoderLayer(nn.Module):
         self.norm1 = nn.LayerNorm(embed_dim)
         self.norm2 = nn.LayerNorm(embed_dim)
         self.dropout = nn.Dropout(dropout)
-    def forward(self, x):
-        attn_output = self.self_attn(x, x, x)
-        x = x + attn_output
+    def forward(self, x, src_mask=None):
+        attn_output = self.self_attn(x, x, x,src_mask)
+        x = x + self.dropout(attn_output)
         x = self.norm1(x)
         ffn_output = self.ffn(x)
         x = x + self.dropout(ffn_output)
@@ -98,12 +116,12 @@ class TransformerDecoderLayer(nn.Module):
         self.norm3 = nn.LayerNorm(embed_dim)
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x, encoder_output):
-        attn_output = self.self_attn(x, x, x)
-        x = x + attn_output
+    def forward(self, x, encoder_output,mask=None):
+        attn_output = self.self_attn(x, x, x, mask)
+        x = x + self.dropout(attn_output)
         x = self.norm1(x)
-        cross_attn_output = self.cross_attn(x, encoder_output, encoder_output)
-        x = x + cross_attn_output
+        cross_attn_output = self.cross_attn(x, encoder_output, encoder_output, mask)
+        x = x + self.dropout(cross_attn_output)
         x = self.norm2(x)
         ffn_output = self.ffn(x)
         x = x + self.dropout(ffn_output)
@@ -111,21 +129,41 @@ class TransformerDecoderLayer(nn.Module):
 
         return x
 
+def get_mask_from_lengths(lengths, max_len=None):
+    if max_len is None:
+        max_len = lengths.max().item()
+    ids = torch.arange(0, max_len, device=lengths.device).unsqueeze(0)
+    mask = (ids >= lengths.unsqueeze(1))
+    return mask
+
 class DurationPredictor(nn.Module):
-    def __init__(self,embedding_dim,hidden_dim):
+    def __init__(self, embedding_dim, hidden_dim):
         super().__init__()
-        self.fc1=nn.Linear(embedding_dim,hidden_dim*2)
-        self.act=nn.ReLU()
-        self.fc2=nn.Linear(hidden_dim*2,1)
+        self.conv_layer = nn.Sequential(
+            nn.Conv1d(embedding_dim, hidden_dim, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.BatchNorm1d(hidden_dim),
+            nn.Dropout(0.1),
+            nn.Conv1d(hidden_dim, hidden_dim, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.BatchNorm1d(hidden_dim),
+            nn.Dropout(0.1),
+        )
+        self.linear_layer = nn.Linear(hidden_dim, 1)
         self.softplus = nn.Softplus()
-    def forward(self,x):
-        batch_size,seq_len,embedding_dim=x.shape
-        x=x.view(batch_size*seq_len,embedding_dim)
-        x=self.fc1(x)
-        x=self.act(x)
-        x=self.fc2(x)
+        self.scale = nn.Parameter(torch.tensor(1.0))
+
+    def forward(self, x, mask=None):
+        x = x.transpose(1, 2)
+        x = self.conv_layer(x) 
+        x = x.transpose(1, 2)
+        x = self.linear_layer(x)
         x = self.softplus(x)
-        x=x.view(batch_size,seq_len)
+        x = x * self.scale
+        x = x.squeeze(-1)
+        if mask is not None:
+            x = x.masked_fill(mask, 0.0)
+        
         return x
 
 class LengthRegulator(nn.Module):
@@ -139,6 +177,7 @@ class LengthRegulator(nn.Module):
         batch_size, seq_len, embedding_dim = x.shape
         expanded_x=[]
         max_seq_len=0
+        mel_len = []
 
         for i in range(batch_size):
             seq=[]
@@ -146,49 +185,101 @@ class LengthRegulator(nn.Module):
                 seq.append(x[i,j].repeat(int(durations[i,j].item()),1))
             seq=torch.cat(seq,dim=0)
             expanded_x.append(seq)
+            mel_len.append(seq.size(0))
 
             if seq.size(0) > max_seq_len:
                 max_seq_len=seq.size(0)
+
         for i in range(batch_size):
             seq_len_index = expanded_x[i].size(0)
-
             if seq_len_index < max_seq_len:
                 padding = torch.zeros((max_seq_len-seq_len_index,embedding_dim),device=x.device)
                 expanded_x[i] = torch.cat([expanded_x[i], padding], dim=0)
+
         expanded_x=torch.stack(expanded_x,dim=0)
+
+        mel_len = torch.LongTensor(mel_len).to(x.device)
+
+        mel_mask = get_mask_from_lengths(mel_len, max_seq_len).to(x.device)
+
         if target is not None and self.projection is not None:
             target = self.projection(target)
-        return expanded_x,target
+        return expanded_x,target,mel_len, mel_mask
+
+class PostNet(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size=5):
+        super().__init__()
+        self.conv_layers = nn.Sequential(
+            nn.Conv1d(in_channels, out_channels, kernel_size=kernel_size, padding=kernel_size//2),
+            nn.BatchNorm1d(out_channels),
+            nn.Tanh(),
+            nn.Dropout(0.1),
+            nn.Conv1d(out_channels, out_channels, kernel_size=kernel_size, padding=kernel_size//2),
+            nn.BatchNorm1d(out_channels),
+            nn.Tanh(),
+            nn.Dropout(0.1),
+            nn.Conv1d(out_channels, out_channels, kernel_size=kernel_size, padding=kernel_size//2),
+        )
+
+    def forward(self, x):
+        return self.conv_layers(x)
 
 class TransformerTTS(nn.Module):
     def __init__(self,vocab_size,embedding_dim,hidden_dim,n_heads,n_layers,output_dim):
         super().__init__()
-        self.embedding = nn.Embedding(vocab_size,embedding_dim=embedding_dim)    # batches x seq_len x embedding_dim
-       
-        self.encoder = nn.ModuleList([TransformerEncoderLayer(embedding_dim, n_heads, hidden_dim) for _ in range(n_layers)]) # batches x seq_len x embedding_dim ----> batches*seq_len x 1 ---> batches x seq_len
+        self.embedding = nn.Embedding(vocab_size,embedding_dim=embedding_dim)
+
+        #Implement Positional encoding here bro
+        self.positional_encoding = PositionalEncoding(embed_dim=embedding_dim, max_len=1000)
+
+        self.encoder = nn.ModuleList([TransformerEncoderLayer(embedding_dim, n_heads, hidden_dim) for _ in range(n_layers)])
         self.decoder = nn.ModuleList([TransformerDecoderLayer(embedding_dim, n_heads, hidden_dim) for _ in range(n_layers)])
        
-        self.duration_predictor= DurationPredictor(embedding_dim=embedding_dim,hidden_dim=hidden_dim) # batches*seq_len x embedding_dim x 1
+        self.duration_predictor= DurationPredictor(embedding_dim=embedding_dim,hidden_dim=hidden_dim)
         self.length_regulator = LengthRegulator(input_dim=output_dim,projection_dim=embedding_dim)
         
         self.fc=nn.Linear(embedding_dim,output_dim)
+        self.duration_max = 100.0
     
-    def forward(self,text,spectogram=None,durations=None):
+    def forward(self,text,src_lens,spectogram=None,durations=None):
         embed=self.embedding(text)
+
+        pos_encoding = self.positional_encoding(embed.shape[1]).to(embed.device)
+        pos_encoding = pos_encoding.expand(embed.shape[0], -1, -1)
+        embed = embed + pos_encoding
+
+        T = text.shape[1]   # Max sequence length
+        src_mask = get_mask_from_lengths(src_lens, T).to(embed.device)
+
         encoder_output=embed
-        for layer in self.encoder:  # Stack encoder layers
-            encoder_output = layer(encoder_output)
-        durationpredictor=self.duration_predictor(encoder_output)
+
+        for layer in self.encoder:
+            encoder_output = layer(encoder_output,src_mask)
+        durationpredictor=self.duration_predictor(encoder_output, src_mask)
         if durations is None:
-            durations = torch.clamp(durationpredictor, min=1.0)
+            print("Raw durationpredictor values:", durationpredictor.cpu().detach().numpy())
+            durations = torch.clamp(durationpredictor, min=0.01, max=1.0) 
+            durations = durations * self.duration_max
+            durations = torch.clamp(durations, min=1.0, max=100.0)
             durations = torch.round(durations).int()
-        durations = durations.squeeze(-1)    
-        reg_output, projected_spectogram = self.length_regulator(encoder_output, durations.squeeze(-1), spectogram)
+        else:
+            durations = durations * self.duration_max
+        durations = durations.squeeze(-1)  
+
+        reg_output, projected_spectogram, mel_len, mel_mask = self.length_regulator(encoder_output, durations, spectogram)
         decoder_output = reg_output if spectogram is None else projected_spectogram
+
+        max_mel_len = decoder_output.shape[1]
+        pos_encoding_dec = self.positional_encoding(max_mel_len).to(decoder_output.device)
+        pos_encoding_dec = pos_encoding_dec.expand(decoder_output.shape[0], -1, -1)
+        decoder_output = decoder_output + pos_encoding_dec
+
+
         for layer in self.decoder:
-            decoder_output = layer(decoder_output,reg_output)
+            decoder_output = layer(decoder_output, reg_output, mel_mask)
+
         output = self.fc(decoder_output)
-        return output,durationpredictor
+        return output, durationpredictor, mel_len, mel_mask
 
 
 
