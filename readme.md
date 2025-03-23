@@ -46,7 +46,7 @@ As visible from the spectrograms, while the model is generating structured outpu
 
 ## Dataset
 
-The model is trained on the LJSpeech dataset.
+The model is trained on the LJSpeech dataset - (https://www.kaggle.com/datasets/tttzof351/ljspeech-prep-fs2)
 
 ## Dependencies
 
