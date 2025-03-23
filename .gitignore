@@ -7,6 +7,5 @@ share/*
 __pycache__
 HIFIGAN
 hifi-gan
-checkpoints
 settings.json
 tensorboard-exp

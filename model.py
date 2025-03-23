@@ -206,6 +206,138 @@ class LengthRegulator(nn.Module):
             target = self.projection(target)
         return expanded_x,target,mel_len, mel_mask
 
+class PitchPredictor(nn.Module):
+    def __init__(self, embedding_dim, hidden_dim):
+        super().__init__()
+        self.conv_layer = nn.Sequential(
+            nn.Conv1d(embedding_dim, hidden_dim, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.BatchNorm1d(hidden_dim),
+            nn.Dropout(0.1),
+            nn.Conv1d(hidden_dim, hidden_dim, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.BatchNorm1d(hidden_dim),
+            nn.Dropout(0.1),
+        )
+        self.linear_layer = nn.Linear(hidden_dim, 1)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x, mask=None):
+        # print("PitchPredictor input shape:", x.shape)
+        x = x.transpose(1, 2)
+        x = self.conv_layer(x) 
+        x = x.transpose(1, 2)
+        x = self.linear_layer(x)
+        x = self.sigmoid(x)
+        x = x.squeeze(-1)
+        if mask is not None:
+            x = x.masked_fill(mask, 0.0)
+        # print("PitchPredictor output shape:", x.shape)
+        return x
+
+class EnergyPredictor(nn.Module):
+    def __init__(self, embedding_dim, hidden_dim):
+        super().__init__()
+        self.conv_layer = nn.Sequential(
+            nn.Conv1d(embedding_dim, hidden_dim, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.BatchNorm1d(hidden_dim),
+            nn.Dropout(0.1),
+            nn.Conv1d(hidden_dim, hidden_dim, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.BatchNorm1d(hidden_dim),
+            nn.Dropout(0.1),
+        )
+        self.linear_layer = nn.Linear(hidden_dim, 1)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x, mask=None):
+        x = x.transpose(1, 2)
+        x = self.conv_layer(x) 
+        x = x.transpose(1, 2)
+        x = self.linear_layer(x)
+        x = self.sigmoid(x)
+        x = x.squeeze(-1)
+        if mask is not None:
+            x = x.masked_fill(mask, 0.0)
+        return x
+
+class VarianceAdapter(nn.Module):
+    def __init__(self,embedding_dim,hidden_dim,mel_output_dim):
+        super().__init__()
+        self.duration_predictor= DurationPredictor(embedding_dim=embedding_dim,hidden_dim=hidden_dim)
+        self.length_regulator = LengthRegulator(input_dim=mel_output_dim,projection_dim=embedding_dim)
+
+        self.pitch_predictor = PitchPredictor(embedding_dim=embedding_dim,hidden_dim=hidden_dim)
+        self.energy_predictor = EnergyPredictor(embedding_dim=embedding_dim,hidden_dim=hidden_dim)
+
+        self.pitch_projection = nn.Linear(1, embedding_dim)
+        self.energy_projection = nn.Linear(1, embedding_dim)
+
+        self.duration_max = 100.0
+        self.pitch_min = 0.0
+        self.pitch_max = 1.0
+        self.energy_min = 0.0
+        self.energy_max = 1.0
+    
+    def set_min_max(self, predictor, min_val, max_val):
+        if predictor == "pitch":
+            self.pitch_min = min_val
+            self.pitch_max = max_val
+        elif predictor == "energy":
+            self.energy_min = min_val
+            self.energy_max = max_val
+    
+    def forward(self,encoder_output,src_mask,durations=None,pitch=None,energy=None,spectogram=None):
+
+        # DURATION
+        durationpredictor=self.duration_predictor(encoder_output, src_mask)
+        if durations is None:
+            print("Raw durationpredictor values:", durationpredictor.cpu().detach().numpy())
+            durations = torch.clamp(durationpredictor, min=0.01, max=1.0) 
+            durations = durations * self.duration_max
+            durations = torch.clamp(durations, min=1.0, max=100.0)
+            durations = torch.round(durations).int()
+        else:
+            durations = durations * self.duration_max
+        durations = durations.squeeze(-1)  
+
+        # LENGTH REGULATOR
+        reg_output, projected_spectogram, mel_len, mel_mask = self.length_regulator(encoder_output, durations, spectogram)
+
+        layer_reg_out = reg_output if spectogram is None else projected_spectogram
+
+        # PITCH PREDICTOR
+        pitchpredictor = self.pitch_predictor(layer_reg_out,mel_mask)
+        if pitch is None:
+            pitch = torch.clamp(pitchpredictor, min=0.01, max=1.0)
+            pitch = pitch * (self.pitch_max - self.pitch_min) + self.pitch_min
+        else:
+            pitch = pitch * (self.pitch_max - self.pitch_min) + self.pitch_min
+        pitch_expanded = pitch.unsqueeze(-1)
+        # print("Layer Regulator output : ",layer_reg_out.shape)
+        # print("Expanded pitch prediction :",self.pitch_projection(pitch_expanded).shape)
+        pitch_output_expanded = layer_reg_out + self.pitch_projection(pitch_expanded)
+
+        #ENERGY PREDICTOR
+        energypredictor = self.energy_predictor(pitch_output_expanded,mel_mask)
+        if energy is None:
+            energy = torch.clamp(energypredictor, min=0.01, max=1.0)
+            energy = energy * (self.energy_max - self.energy_min) + self.energy_min
+        else:
+            energy = energy * (self.energy_max - self.energy_min) + self.energy_min
+        
+        energy_expanded = energy.unsqueeze(-1)
+        energy_output_expanded = pitch_output_expanded + self.energy_projection(energy_expanded)
+
+        predictions = {
+            "duration":durationpredictor,
+            "pitch": pitchpredictor,
+            "energy": energypredictor
+        }
+
+        return energy_output_expanded,predictions,mel_len,mel_mask
+
 class PostNet(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size=5):
         super().__init__()
@@ -234,52 +366,39 @@ class TransformerTTS(nn.Module):
 
         self.encoder = nn.ModuleList([TransformerEncoderLayer(embedding_dim, n_heads, hidden_dim) for _ in range(n_layers)])
         self.decoder = nn.ModuleList([TransformerDecoderLayer(embedding_dim, n_heads, hidden_dim) for _ in range(n_layers)])
-       
-        self.duration_predictor= DurationPredictor(embedding_dim=embedding_dim,hidden_dim=hidden_dim)
-        self.length_regulator = LengthRegulator(input_dim=output_dim,projection_dim=embedding_dim)
-        
+
+        self.variance_adapter = VarianceAdapter(embedding_dim=embedding_dim,hidden_dim=hidden_dim,mel_output_dim=output_dim)
+
         self.fc=nn.Linear(embedding_dim,output_dim)
         self.duration_max = 100.0
     
-    def forward(self,text,src_lens,spectogram=None,durations=None):
+    def forward(self, text, src_lens, spectogram=None, durations=None, pitch=None, energy=None):
         embed=self.embedding(text)
 
         pos_encoding = self.positional_encoding(embed.shape[1]).to(embed.device)
         pos_encoding = pos_encoding.expand(embed.shape[0], -1, -1)
         embed = embed + pos_encoding
 
-        T = text.shape[1]   # Max sequence length
+        T = text.shape[1]
         src_mask = get_mask_from_lengths(src_lens, T).to(embed.device)
 
         encoder_output=embed
 
         for layer in self.encoder:
             encoder_output = layer(encoder_output,src_mask)
-        durationpredictor=self.duration_predictor(encoder_output, src_mask)
-        if durations is None:
-            print("Raw durationpredictor values:", durationpredictor.cpu().detach().numpy())
-            durations = torch.clamp(durationpredictor, min=0.01, max=1.0) 
-            durations = durations * self.duration_max
-            durations = torch.clamp(durations, min=1.0, max=100.0)
-            durations = torch.round(durations).int()
-        else:
-            durations = durations * self.duration_max
-        durations = durations.squeeze(-1)  
 
-        reg_output, projected_spectogram, mel_len, mel_mask = self.length_regulator(encoder_output, durations, spectogram)
-        decoder_output = reg_output if spectogram is None else projected_spectogram
+        variance_adapter_output, predictions, mel_len, mel_mask = self.variance_adapter(encoder_output,src_mask,durations,pitch,energy,spectogram)
 
-        max_mel_len = decoder_output.shape[1]
-        pos_encoding_dec = self.positional_encoding(max_mel_len).to(decoder_output.device)
-        pos_encoding_dec = pos_encoding_dec.expand(decoder_output.shape[0], -1, -1)
-        decoder_output = decoder_output + pos_encoding_dec
-
+        max_mel_len = variance_adapter_output.shape[1]
+        pos_encoding_dec = self.positional_encoding(max_mel_len).to(variance_adapter_output.device)
+        pos_encoding_dec = pos_encoding_dec.expand(variance_adapter_output.shape[0], -1, -1)
+        decoder_input = variance_adapter_output + pos_encoding_dec
 
         for layer in self.decoder:
-            decoder_output = layer(decoder_output, reg_output, mel_mask)
+            decoder_output = layer(decoder_input, variance_adapter_output, mel_mask)
 
         output = self.fc(decoder_output)
-        return output, durationpredictor, mel_len, mel_mask
+        return output, predictions, mel_len, mel_mask
 
 
 
